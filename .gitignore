@@ -1,19 +1,60 @@
-CMakeLists.txt.user
-CMakeCache.txt
-CMakeFiles
-CMakeScripts
-Testing
-Makefile
-cmake_install.cmake
-install_manifest.txt
-compile_commands.json
-CTestTestfile.cmake
-_deps
-CMakeUserPresets.json
+.config
+*.o
+*.pyc
 
-# CLion
-#  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
-#  and can be added to the global gitignore or merged into this file.  For a more nuclear
-#  option (not recommended) you can uncomment the following to ignore the entire idea folder.
-#cmake-build-*
+# gtags
+GTAGS
+GRTAGS
+GPATH
+
+# emacs
+.dir-locals.el
+
+# emacs temp file suffixes
+*~
+.#*
+\#*#
+# MacOS directory files
+.DS_Store
+
+# eclipse setting
+.settings
+
+# Example project files
+examples/**/sdkconfig
+examples/**/sdkconfig.old
+examples/**/build
+examples/**/managed_components
+examples/**/dependencies.lock
+
+# Components files
+components/**/sdkconfig
+components/**/sdkconfig.old
+components/**/build
+components/**/managed_components
+components/**/dependencies.lock
+
+# Doc build artifacts
+docs/_build/
+docs/*/_build/
+docs/*/doxygen-warning-log.txt
+docs/*/sphinx-warning-log.txt
+docs/*/sphinx-warning-log-sanitized.txt
+docs/*/xml/
+docs/*/xml_in/
+docs/*/man/
+docs/*/doxygen_sqlite3.db
+
+# Downloaded font files
+docs/_static/DejaVuSans.ttf
+docs/_static/NotoSansSC-Regular.otf
+
+# gcov coverage reports
+*.gcda
+*.gcno
+coverage.info
+coverage_report/
+
+.vscode
+
+docs/venv/
