@@ -19,7 +19,7 @@
 #include "audio_event_iface.h"
 #include "audio_mem.h"
 #include "audio_common.h"
-#include "i2s_stream.h"
+#include "dac_stream.h"
 #include "mp3_decoder.h"
 #include "esp_peripherals.h"
 #include "periph_touch.h"
@@ -89,7 +89,7 @@ int mp3_music_read_cb(audio_element_handle_t el, char *buf, int len, TickType_t 
 void app_main(void)
 {
     audio_pipeline_handle_t pipeline;
-    audio_element_handle_t i2s_stream_writer, mp3_decoder;
+    audio_element_handle_t dac_stream_writer, mp3_decoder;
 
     esp_log_level_set("*", ESP_LOG_WARN);
     esp_log_level_set(TAG, ESP_LOG_INFO);
@@ -111,21 +111,19 @@ void app_main(void)
     mp3_decoder = mp3_decoder_init(&mp3_cfg);
     audio_element_set_read_cb(mp3_decoder, mp3_music_read_cb, NULL);
 
-    ESP_LOGI(TAG, "[2.2] Create i2s stream to write data to codec chip");
-#if defined CONFIG_ESP32_C3_LYRA_V2_BOARD
-    i2s_stream_cfg_t i2s_cfg = I2S_STREAM_PDM_TX_CFG_DEFAULT();
-#else
-    i2s_stream_cfg_t i2s_cfg = I2S_STREAM_CFG_DEFAULT();
-#endif
-    i2s_cfg.type = AUDIO_STREAM_WRITER;
-    i2s_stream_writer = i2s_stream_init(&i2s_cfg);
+    ESP_LOGI(TAG, "[2.2] Create dac stream to write data to dac");
+    dac_stream_cfg_t dac_cfg = DAC_STREAM_CFG_DEFAULT();
+    dac_cfg.dac_config.enable_left = true;
+    dac_cfg.dac_config.enable_right = false;
+    dac_cfg.dac_config.output_type = DAC_OUTPUT_TYPE_MONO_MIX;
+    dac_stream_writer = dac_stream_init(&dac_cfg);
 
     ESP_LOGI(TAG, "[2.3] Register all elements to audio pipeline");
     audio_pipeline_register(pipeline, mp3_decoder, "mp3");
-    audio_pipeline_register(pipeline, i2s_stream_writer, "i2s");
+    audio_pipeline_register(pipeline, dac_stream_writer, "dac");
 
-    ESP_LOGI(TAG, "[2.4] Link it together [mp3_music_read_cb]-->mp3_decoder-->i2s_stream-->[codec_chip]");
-    const char *link_tag[2] = {"mp3", "i2s"};
+    ESP_LOGI(TAG, "[2.4] Link it together [mp3_music_read_cb]-->mp3_decoder-->dac_stream-->[codec_chip]");
+    const char *link_tag[2] = {"mp3", "dac"};
     audio_pipeline_link(pipeline, &link_tag[0], 2);
 
     ESP_LOGI(TAG, "[ 3 ] Initialize peripherals");
@@ -166,7 +164,7 @@ void app_main(void)
             audio_element_getinfo(mp3_decoder, &music_info);
             ESP_LOGI(TAG, "[ * ] Receive music info from mp3 decoder, sample_rates=%d, bits=%d, ch=%d",
                      music_info.sample_rates, music_info.bits, music_info.channels);
-            i2s_stream_set_clk(i2s_stream_writer, music_info.sample_rates, music_info.bits, music_info.channels);
+            dac_stream_set_clk(dac_stream_writer, music_info.sample_rates, music_info.bits, music_info.channels);
             continue;
         }
 
@@ -174,7 +172,7 @@ void app_main(void)
             && (msg.cmd == PERIPH_TOUCH_TAP || msg.cmd == PERIPH_BUTTON_PRESSED || msg.cmd == PERIPH_ADC_BUTTON_PRESSED)) {
             if ((int) msg.data == get_input_play_id()) {
                 ESP_LOGI(TAG, "[ * ] [Play] touch tap event");
-                audio_element_state_t el_state = audio_element_get_state(i2s_stream_writer);
+                audio_element_state_t el_state = audio_element_get_state(dac_stream_writer);
                 switch (el_state) {
                     case AEL_STATE_INIT :
                         ESP_LOGI(TAG, "[ * ] Starting audio pipeline");
@@ -237,7 +235,7 @@ void app_main(void)
     audio_pipeline_wait_for_stop(pipeline);
     audio_pipeline_terminate(pipeline);
     audio_pipeline_unregister(pipeline, mp3_decoder);
-    audio_pipeline_unregister(pipeline, i2s_stream_writer);
+    audio_pipeline_unregister(pipeline, dac_stream_writer);
 
     /* Terminate the pipeline before removing the listener */
     audio_pipeline_remove_listener(pipeline);
@@ -247,6 +245,6 @@ void app_main(void)
 
     /* Release all resources */
     audio_pipeline_deinit(pipeline);
-    audio_element_deinit(i2s_stream_writer);
+    audio_element_deinit(dac_stream_writer);
     audio_element_deinit(mp3_decoder);
 }
