@@ -50,73 +50,22 @@ static const char *TAG = "DAC_STREAM";
 #define CHANNEL_RIGHT_MASK  (0x02)
 #define AUDIO_DAC_CH_MAX (2)
 
-typedef enum {
-    AUDIO_DAC_STATUS_UNINIT = 0,    /*!< dac audio uninitialized */
-    AUDIO_DAC_STATUS_IDLE   = 1,    /*!< dac audio idle */
-    AUDIO_DAC_STATUS_BUSY   = 2,    /*!< dac audio busy */
-} audio_dac_status_t;
-
-typedef struct {
+typedef struct dac_stream {
+    dac_stream_cfg_t        config;
+    bool                    is_open;
+    bool                    reinit;
     dac_continuous_handle_t dac_handle;
-    audio_dac_config_t      config;                          /**< copy of dac audio config struct */
     uint8_t                 *data;
     uint32_t                channel_set_num;                 /**< channel audio set number */
     int32_t                 framerate;                       /*!< frame rates in Hz */
     int32_t                 bits_per_sample;                 /*!< bits per sample (16, 32) */
-    audio_dac_status_t      status;
-} audio_dac_t;
-typedef audio_dac_t *audio_dac_handle_t;
-
-typedef struct dac_stream {
-    audio_stream_type_t type;
-    dac_stream_cfg_t    config;
-    bool                is_open;
-    bool                uninstall_drv;
-    audio_dac_t         dac;
 } dac_stream_t;
-
-
-static esp_err_t audio_dac_set_param(audio_dac_handle_t handle,int rate, int bits, int ch);
-static esp_err_t audio_dac_start(audio_dac_handle_t handle);
-static esp_err_t audio_dac_stop(audio_dac_handle_t handle);
 
 //
 
-static esp_err_t audio_dac_init(audio_dac_handle_t handle, const audio_dac_config_t *cfg)
+static esp_err_t audio_dac_set_param(dac_stream_t *handle, int rate, int bits, int ch)
 {
     esp_err_t res = ESP_OK;
-    AUDIO_NULL_CHECK(TAG, cfg, return ESP_ERR_INVALID_ARG);
-
-    //audio_dac_handle_t handle = NULL;
-    //handle = heap_caps_calloc(1, sizeof(audio_dac_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    //AUDIO_NULL_CHECK(TAG, handle, goto init_error);
-
-    handle->data = heap_caps_calloc(1, cfg->buffer_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    AUDIO_NULL_CHECK(TAG, handle->data, goto init_error);
-
-    handle->config = *cfg;
-
-    // Initialize DAC in open
-
-    handle->status = AUDIO_DAC_STATUS_IDLE;
-    return res;
-
-init_error:
-    if (handle->data) {
-        audio_free(handle->data);
-        handle->data = NULL;
-    }
-    if (handle) {
-        audio_free(handle);
-        handle = NULL;
-    }
-    return ESP_FAIL;
-}
-
-static esp_err_t audio_dac_set_param(audio_dac_handle_t handle, int rate, int bits, int ch)
-{
-    esp_err_t res = ESP_OK;
-    AUDIO_CHECK(TAG, handle->status != AUDIO_DAC_STATUS_BUSY, return ESP_FAIL, "AUDIO DAC CAN NOT SET PARAM, WHEN AUDIO DAC STATUS IS BUSY");
     if (rate > SAMPLE_RATE_MAX || rate < SAMPLE_RATE_MIN) {
         ESP_LOGE(TAG, "%s:%d (%s): AUDIO DAC SAMPLE IS %d AND SHOULD BE BETWEEN 648 AND 48000", __FILENAME__, __LINE__, __FUNCTION__, rate);
     }
@@ -126,11 +75,13 @@ static esp_err_t audio_dac_set_param(audio_dac_handle_t handle, int rate, int bi
     if (!(ch == 2 || ch == 1)) {
         ESP_LOGE(TAG, "%s:%d (%s): AUDIO DAC CH IS %d AND SHOULD BE 1 OR 2", __FILENAME__, __LINE__, __FUNCTION__, ch);
     }
-
+    ESP_LOGI(TAG, "Set audio DAC param, rate %d, bits %d, ch %d", rate, bits, ch);
+    if (handle->framerate != rate || handle->bits_per_sample != bits || handle->channel_set_num != ch) {
+        handle->reinit = handle->is_open;
+    }
     handle->framerate = rate;
     handle->bits_per_sample = bits;
     handle->channel_set_num = ch;
-    ESP_LOGI(TAG, "Set audio DAC param, rate %d, bits %d, ch %d", rate, bits, ch);
     return res;
 }
 
@@ -243,16 +194,15 @@ static esp_err_t dac_data_convert(uint8_t *outbuf, size_t *outbuf_len, uint8_t *
     return ESP_OK;
 }
 
-static esp_err_t audio_dac_write(audio_dac_handle_t handle, uint8_t *inbuf, size_t inbuf_len, size_t *bytes_written, TickType_t ticks_to_wait)
+static esp_err_t audio_dac_write(dac_stream_t *handle, uint8_t *inbuf, size_t inbuf_len, size_t *bytes_written, TickType_t ticks_to_wait)
 {
     esp_err_t res = ESP_OK;
     AUDIO_NULL_CHECK(TAG, inbuf, return ESP_FAIL);
 
-    if (handle->status != AUDIO_DAC_STATUS_BUSY) {
+    if (!handle->dac_handle) {
         vTaskDelay(pdMS_TO_TICKS(100)); // Just wait a little and maybe they initialize the DAC by then
-        //ESP_LOGI(TAG, "Bits per sample: %d, Channels: %d, Channel type: %d", handle->bits_per_sample, handle->channel_set_num, handle->config.output_type);
-        if (handle->status != AUDIO_DAC_STATUS_BUSY) {
-            ESP_LOGW(TAG, "%s:%d (%s): AUDIO DAC CAN NOT WRITE DATA, WHEN AUDIO DAC STATUS IS %d", __FILENAME__, __LINE__, __FUNCTION__, handle->status);
+        if (!handle->dac_handle) {
+            ESP_LOGW(TAG, "%s:%d (%s): AUDIO DAC CAN NOT WRITE DATA, WHEN AUDIO DAC STATUS IS %d", __FILENAME__, __LINE__, __FUNCTION__, handle->dac_handle);
             // Just discard the data
             *bytes_written = inbuf_len;
             return ESP_OK;
@@ -264,9 +214,9 @@ static esp_err_t audio_dac_write(audio_dac_handle_t handle, uint8_t *inbuf, size
     uint8_t *in = inbuf;
 
     while (inbuf_len) {
-        size_t out_bytes = handle->config.buffer_size;
+        size_t out_bytes = handle->config.dac_config.buffer_size;
         size_t bytes_converted = 0;
-        dac_data_convert(out, &out_bytes, in, inbuf_len, &bytes_converted, handle->bits_per_sample, handle->channel_set_num, handle->config.output_type);
+        dac_data_convert(out, &out_bytes, in, inbuf_len, &bytes_converted, handle->bits_per_sample, handle->channel_set_num, handle->config.dac_config.output_type);
 
         size_t bytes_loaded = 0;
         // TODO check if all bytes are loaded and handle the case where they are not
@@ -281,18 +231,19 @@ static esp_err_t audio_dac_write(audio_dac_handle_t handle, uint8_t *inbuf, size
     return res;
 }
 
-static esp_err_t audio_dac_start(audio_dac_handle_t handle)
+static esp_err_t audio_dac_start(dac_stream_t *handle)
 {
     esp_err_t res = ESP_OK;
     ESP_LOGD(TAG, "Start audio dac");
 
-    if (handle->status != AUDIO_DAC_STATUS_IDLE) {
-        ESP_LOGE(TAG, "%s:%d (%s): AUDIO DAC STATE IS %d, AND SHOULD BE IDLE WHEN DAC START", __FILENAME__, __LINE__, __FUNCTION__, handle->status);
+    if (handle->dac_handle) {
+        ESP_LOGE(TAG, "%s:%d (%s): AUDIO DAC STATE IS %p, AND SHOULD BE IDLE WHEN DAC START", 
+            __FILENAME__, __LINE__, __FUNCTION__, handle->dac_handle);
     }
     dac_continuous_config_t cont_cfg = {
-        .chan_mask = (handle->config.enable_left ? DAC_CHANNEL_MASK_CH0 : 0) | (handle->config.enable_right ? DAC_CHANNEL_MASK_CH1 : 0),
+        .chan_mask = (handle->config.dac_config.enable_left ? DAC_CHANNEL_MASK_CH0 : 0) | (handle->config.dac_config.enable_right ? DAC_CHANNEL_MASK_CH1 : 0),
         .desc_num = 4,
-        .buf_size = handle->config.buffer_size,
+        .buf_size = handle->config.dac_config.buffer_size,
         .freq_hz = handle->framerate,
         .offset = -128,
         .clk_src = DAC_DIGI_CLK_SRC_APLL,   // Using APLL as clock source to get a wider frequency range
@@ -304,20 +255,20 @@ static esp_err_t audio_dac_start(audio_dac_handle_t handle)
          *      - channel 0: A C E
          *      - channel 1: B D F
          */
-        .chan_mode = (handle->config.output_type == DAC_OUTPUT_TYPE_STEREO) ? 
+        .chan_mode = (handle->config.dac_config.output_type == DAC_OUTPUT_TYPE_STEREO) ? 
             DAC_CHANNEL_MODE_ALTER : DAC_CHANNEL_MODE_SIMUL,
     };
     /* Allocate continuous channels */
     AUDIO_CHECK(TAG, ESP_OK == dac_continuous_new_channels(&cont_cfg, &handle->dac_handle), goto init_error, "AUDIO DAC NEW CHANNELS ERROR");
     AUDIO_CHECK(TAG, ESP_OK == dac_continuous_enable(handle->dac_handle), res = ESP_FAIL, "AUDIO DAC ENABLE ERROR");
-    ESP_LOGI(TAG, "Audio DAC started with frequency %d", handle->framerate);
+    ESP_LOGI(TAG, "Audio DAC started with frequency %d %s", handle->framerate, 
+        (handle->config.dac_config.output_type == DAC_OUTPUT_TYPE_STEREO) ? "stereo" : "mono");
 
-    handle->status = AUDIO_DAC_STATUS_BUSY;
 init_error:
     return res;
 }
 
-static esp_err_t audio_dac_stop(audio_dac_handle_t handle)
+static esp_err_t audio_dac_stop(dac_stream_t *handle)
 {
     esp_err_t res = ESP_OK;
     if (handle->dac_handle) {
@@ -325,34 +276,15 @@ static esp_err_t audio_dac_stop(audio_dac_handle_t handle)
         AUDIO_CHECK(TAG, ESP_OK == dac_continuous_del_channels(handle->dac_handle), res = ESP_FAIL, "AUDIO DAC DEL CHANNELS ERROR");
         handle->dac_handle = NULL;
     }
-    handle->status = AUDIO_DAC_STATUS_IDLE;
     ESP_LOGI(TAG, "Audio DAC stopped");
     return res;
-}
-
-static esp_err_t audio_dac_deinit(audio_dac_handle_t handle)
-{
-    AUDIO_NULL_CHECK(TAG, handle, return ESP_FAIL);
-    handle->status = AUDIO_DAC_STATUS_UNINIT;
-    audio_dac_stop(handle);
-
-    gpio_set_direction(DAC_STREAM_GPIO_NUM_LEFT, GPIO_MODE_INPUT);
-    gpio_set_direction(DAC_STREAM_GPIO_NUM_RIGHT, GPIO_MODE_INPUT);
-    // To prevent noise.
-    //gpio_set_pull_mode(DAC_STREAM_GPIO_NUM_LEFT, GPIO_PULLUP_ONLY);
-    //gpio_set_pull_mode(DAC_STREAM_GPIO_NUM_RIGHT, GPIO_PULLUP_ONLY);
-
-    audio_free(handle->data);
-    handle->data = NULL;
-    audio_free(handle);
-    return ESP_OK;
 }
 
 static int _dac_write(audio_element_handle_t self, char *buffer, int len, TickType_t ticks_to_wait, void *context)
 {
     dac_stream_t *dac_stream = (dac_stream_t *)audio_element_getdata(self);
     size_t bytes_written = 0;
-    audio_dac_write(&dac_stream->dac, (uint8_t *)buffer, len, &bytes_written, ticks_to_wait);
+    audio_dac_write(dac_stream, (uint8_t *)buffer, len, &bytes_written, ticks_to_wait);
     return bytes_written;
 }
 
@@ -361,9 +293,17 @@ static esp_err_t _dac_destroy(audio_element_handle_t self)
     dac_stream_t *dac_stream = (dac_stream_t *)audio_element_getdata(self);
     ESP_LOGI(TAG, "Destroy DAC stream");
     esp_err_t res = ESP_OK;
-    if (dac_stream->uninstall_drv) {
-        res = audio_dac_deinit(&dac_stream->dac);
-    }
+
+    res = audio_dac_stop(dac_stream);
+    // Is any of this needed?
+    //gpio_reset_pin(DAC_STREAM_GPIO_NUM_LEFT);
+    //gpio_reset_pin(DAC_STREAM_GPIO_NUM_RIGHT);
+    //gpio_set_direction(DAC_STREAM_GPIO_NUM_LEFT, GPIO_MODE_INPUT);
+    //gpio_set_direction(DAC_STREAM_GPIO_NUM_RIGHT, GPIO_MODE_INPUT);
+    // To prevent noise.
+    //gpio_set_pull_mode(DAC_STREAM_GPIO_NUM_LEFT, GPIO_PULLUP_ONLY);
+    //gpio_set_pull_mode(DAC_STREAM_GPIO_NUM_RIGHT, GPIO_PULLUP_ONLY);
+
     audio_free(dac_stream);
     return res;
 }
@@ -377,11 +317,12 @@ static esp_err_t _dac_open(audio_element_handle_t self)
         return ESP_OK;
     }
     res = audio_element_set_input_timeout(self, 2000 / portTICK_RATE_MS);
+
+    dac_stream->data = heap_caps_calloc(1, dac_stream->config.dac_config.buffer_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    AUDIO_NULL_CHECK(TAG, dac_stream->data, res = ESP_FAIL);
+
+    res |= audio_dac_start(dac_stream);
     dac_stream->is_open = true;
-
-    audio_dac_set_param(&dac_stream->dac, 8000, 16, 2); // FIXME defaults
-    //audio_dac_start(&dac_stream->dac);
-
     return res;
 }
 
@@ -394,7 +335,11 @@ static esp_err_t _dac_close(audio_element_handle_t self)
     if (AEL_STATE_PAUSED != audio_element_get_state(self)) {
         audio_element_report_pos(self);
         audio_element_set_byte_pos(self, 0);
-        res = audio_dac_stop(&dac_stream->dac);
+    }
+    res = audio_dac_stop(dac_stream);
+    if (dac_stream->data) {
+        free(dac_stream->data);
+        dac_stream->data = NULL;
     }
     return res;
 }
@@ -402,6 +347,15 @@ static esp_err_t _dac_close(audio_element_handle_t self)
 static int _dac_process(audio_element_handle_t self, char *in_buffer, int in_len)
 {
     //ESP_LOGI(TAG, "Process DAC stream, in_len %d", in_len);
+    dac_stream_t *dac_stream = (dac_stream_t *)audio_element_getdata(self);
+
+    if (dac_stream->reinit) {
+        ESP_LOGI(TAG, "Reinitializing DAC stream");
+        audio_dac_stop(dac_stream);
+        audio_dac_start(dac_stream);
+        dac_stream->reinit = false;
+    }
+
     int r_size = audio_element_input(self, in_buffer, in_len);
     int w_size = 0;
     if (r_size > 0) {
@@ -416,35 +370,31 @@ audio_element_handle_t dac_stream_init(dac_stream_cfg_t *config)
 {
     audio_element_cfg_t cfg = DEFAULT_AUDIO_ELEMENT_CONFIG();
 
+    if (config->type != AUDIO_STREAM_WRITER) {
+        ESP_LOGE(TAG, "DAC stream only support AUDIO_STREAM_WRITER mode, not support %d", config->type);
+        return NULL;
+    }
     cfg.open = _dac_open;
     cfg.close = _dac_close;
     cfg.process = _dac_process;
     cfg.destroy = _dac_destroy;
+    cfg.write = _dac_write;
     cfg.tag = "dac";
     cfg.task_stack = config->task_stack;
     cfg.task_prio = config->task_prio;
     cfg.task_core = config->task_core;
     //cfg.buffer_len = config->buffer_len;
     cfg.stack_in_ext = config->ext_stack;
-    if (config->type == AUDIO_STREAM_WRITER) {
-        cfg.write = _dac_write;
-    } else {
-        ESP_LOGE(TAG, "DAC stream only support AUDIO_STREAM_WRITER mode, not support %d", config->type);
-        return NULL;
-    }
 
     dac_stream_t *dac_stream = audio_calloc(1, sizeof(dac_stream_t));
     AUDIO_NULL_CHECK(TAG, dac_stream, return NULL);
     memcpy(&dac_stream->config, config, sizeof(dac_stream_cfg_t));
 
-    dac_stream->type = AUDIO_STREAM_WRITER;
-    dac_stream->uninstall_drv = true;
-
     audio_element_handle_t el = audio_element_init(&cfg);
     audio_element_setdata(el, dac_stream);
 
-    audio_dac_init(&dac_stream->dac, &config->dac_config);
-
+    // Initialize DAC in open
+    audio_dac_set_param(dac_stream, 8000, 16, 2); // TODO defaults
 
     ESP_LOGD(TAG, "dac_stream_init init,el:%p", el);
     return el;
@@ -453,12 +403,6 @@ audio_element_handle_t dac_stream_init(dac_stream_cfg_t *config)
 esp_err_t dac_stream_set_clk(audio_element_handle_t self, int rate, int bits, int ch)
 {
     dac_stream_t *dac_stream = (dac_stream_t *)audio_element_getdata(self);
-    audio_dac_handle_t handle = &dac_stream->dac;
-    esp_err_t res = ESP_OK;
-    if (handle->status == AUDIO_DAC_STATUS_BUSY) {
-        audio_dac_stop(handle);
-    }
-    res |= audio_dac_set_param(handle, rate, bits, ch);
-    res |= audio_dac_start(handle);
+    esp_err_t res = audio_dac_set_param(dac_stream, rate, bits, ch);
     return res;
 }
