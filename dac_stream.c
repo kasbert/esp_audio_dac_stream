@@ -85,36 +85,36 @@ static esp_err_t audio_dac_set_param(dac_stream_t *handle, int rate, int bits, i
     return res;
 }
 
+#define MIN(a,b) (((a)<(b))?(a):(b))
+
 static esp_err_t dac_data_convert(uint8_t *outbuf, size_t *outbuf_len, uint8_t *inbuf, size_t inbuf_len, size_t *bytes_written, int32_t bits_per_sample, int32_t channels, dac_output_type_t output_type)
 {
     int8_t* inbuf8 = (int8_t*)inbuf;
     int16_t* inbuf16 = (int16_t*)inbuf;
     int32_t* inbuf32 = (int32_t*)inbuf;
-    int inlen8 = inbuf_len;
-    int inlen16 = inbuf_len / 2;
-    int inlen32 = inbuf_len / 4;
+    int inlen8 = MIN(inbuf_len, *outbuf_len);
+    int inlen16 = inlen8 / 2;
+    int inlen32 = inlen8 / 4;
 
     //ESP_LOGI(TAG, "Convert data, inbuf_len %d, outbuf_len %d, bits_per_sample %d, channels %d, output_type %d", inbuf_len, *outbuf_len, bits_per_sample, channels, output_type);
     int o = 0, i = 0;
     if (channels == 1 && output_type == DAC_OUTPUT_TYPE_STEREO) {
-        // Copy mono data to both channels
         //ESP_LOGI(TAG, "Copy mono data to both channels");
         if (bits_per_sample == 32) {
             for (; i < inlen32; i++, o += 2) {
                 outbuf[o] = outbuf[o+1] = inbuf32[i] / (256*256*256);
             }
         } else if (bits_per_sample == 16) {
-            for (; i < inlen16 && o < 2047; i++, o += 2) {
+            for (; i < inlen16; i++, o += 2) {
                 outbuf[o] = outbuf[o+1] = inbuf16[i] / 256;
             }
         } else { // 8 bits
             // The only case where output is bigger than input
-            for (; i < inlen8 && o < *outbuf_len && o < 2047; i++, o += 2) {
+            for (; i < inlen8; i++, o += 2) {
                 outbuf[o] = outbuf[o+1] = inbuf8[i];
             }
         }
     } else if (channels == 1 || (channels == 2 && output_type == DAC_OUTPUT_TYPE_STEREO)) {
-        // Copy data without changes
         //ESP_LOGI(TAG, "Copy data without changes");
         if (bits_per_sample == 32) {
             for (; i < inlen32; i++, o++) {
@@ -131,7 +131,6 @@ static esp_err_t dac_data_convert(uint8_t *outbuf, size_t *outbuf_len, uint8_t *
         }
     // 2 channels with the rest of the channel types
     } else if (output_type == DAC_OUTPUT_TYPE_MONO_MIX) {
-        // Average left and right channel data to both channels
         //ESP_LOGI(TAG, "Average left and right channel data to both channels");
         if (bits_per_sample == 32) {
             for (; i < inlen32; i += 2, o++) {
@@ -147,7 +146,7 @@ static esp_err_t dac_data_convert(uint8_t *outbuf, size_t *outbuf_len, uint8_t *
             }
         }
     } else if (output_type == DAC_OUTPUT_TYPE_MONO_LEFT) {
-        // Copy only left channel data to both channels
+        //ESP_LOGI(TAG, "Copy only left channel data to both channels");
         if (bits_per_sample == 32) {
             for (; i < inlen32; i += 2, o++) {
                 outbuf[o] = inbuf32[i+CHANNEL_LEFT_INDEX] / (256*256*256);
@@ -162,7 +161,7 @@ static esp_err_t dac_data_convert(uint8_t *outbuf, size_t *outbuf_len, uint8_t *
             }
         }
     } else if (output_type == DAC_OUTPUT_TYPE_MONO_RIGHT) {
-        // Copy only right channel data to both channels
+        //ESP_LOGI(TAG, "Copy only right channel data to both channels");
         if (bits_per_sample == 32) {
             for (; i < inlen32; i += 2, o++) {
                 outbuf[o] = inbuf32[i+CHANNEL_RIGHT_INDEX] / (256*256*256);
@@ -319,11 +318,13 @@ static esp_err_t _dac_open(audio_element_handle_t self)
     res = audio_element_set_input_timeout(self, 2000 / portTICK_RATE_MS);
 
     dac_stream->data = heap_caps_calloc(1, dac_stream->config.dac_config.buffer_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    AUDIO_NULL_CHECK(TAG, dac_stream->data, res = ESP_FAIL);
+    AUDIO_NULL_CHECK(TAG, dac_stream->data, goto open_failed);
 
     res |= audio_dac_start(dac_stream);
     dac_stream->is_open = true;
     return res;
+    open_failed:
+    return ESP_FAIL;
 }
 
 static esp_err_t _dac_close(audio_element_handle_t self)
@@ -338,7 +339,7 @@ static esp_err_t _dac_close(audio_element_handle_t self)
     }
     res = audio_dac_stop(dac_stream);
     if (dac_stream->data) {
-        free(dac_stream->data);
+        heap_caps_free(dac_stream->data);
         dac_stream->data = NULL;
     }
     return res;
@@ -346,8 +347,8 @@ static esp_err_t _dac_close(audio_element_handle_t self)
 
 static int _dac_process(audio_element_handle_t self, char *in_buffer, int in_len)
 {
-    //ESP_LOGI(TAG, "Process DAC stream, in_len %d", in_len);
     dac_stream_t *dac_stream = (dac_stream_t *)audio_element_getdata(self);
+    ESP_LOGD(TAG, "Process DAC stream, in_len %d", in_len);
 
     if (dac_stream->reinit) {
         ESP_LOGI(TAG, "Reinitializing DAC stream");

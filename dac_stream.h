@@ -26,7 +26,6 @@
 #define _DAC_STREAM_H_
 
 #include "driver/dac_continuous.h"
-//#include "driver/timer.h"
 
 #ifdef __cplusplus
 extern "C" {
